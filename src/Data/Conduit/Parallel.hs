@@ -4,7 +4,6 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE RankNTypes                 #-}
 {-# LANGUAGE ScopedTypeVariables        #-}
-{-# LANGUAGE TupleSections              #-}
 {-# LANGUAGE TypeFamilies               #-}
 {-# LANGUAGE UndecidableInstances       #-}
 
@@ -284,62 +283,54 @@ module Data.Conduit.Parallel(
                             Just _ -> consumeAll
 
 
+    waitFirst :: forall r1 r2 r m . MonadUnliftIO m
+                => (r1 -> r2 -> r)
+                -> m (Async r1)
+                -> m (Async r2)
+                -> m (Async r)
+    waitFirst f ma1 ma2 = do
+        a1 <- ma1
+        a2 <- ma2
+        r1 <- wait a1
+        return $ f r1 <$> a2
+
     parFuse :: forall i o x m r .
                     MonadUnliftIO m
                     => ParConduit i x m ()
                     -> ParConduit x o m r
                     -> ParConduit i o m r
-    parFuse = parFuseInternal fixup
-        where
-            fixup :: m (Async ()) -> m (Async r) -> m (Async r)
-            fixup ma1 ma2 = do
-                a1 <- ma1
-                a2 <- ma2
-                () <- wait a1
-                return a2
+    parFuse = parFuseInternal (waitFirst (flip const))
 
     parFuseUpstream :: forall i o x m r .
                     MonadUnliftIO m
                     => ParConduit i x m r
                     -> ParConduit x o m ()
                     -> ParConduit i o m r
-    parFuseUpstream = parFuseInternal fixup
+    parFuseUpstream = parFuseInternal go
         where
-            fixup :: m (Async r) -> m (Async ()) -> m (Async r)
-            fixup ma1 ma2 = do
-                a1 <- ma1
-                a2 <- ma2
+            go :: m (Async r)
+                -> m (Async ())
+                -> m (Async r)
+            go m1 m2 = do
+                a1 <- m1
+                a2 <- m2
                 () <- wait a2
                 return a1
-
 
     parFuseBoth :: forall i o x m r1 r2 .
                     MonadUnliftIO m
                     => ParConduit i x m r1
                     -> ParConduit x o m r2
                     -> ParConduit i o m (r1, r2)
-    parFuseBoth = parFuseInternal fixup
-        where
-            fixup :: m (Async r1) -> m (Async r2) -> m (Async (r1, r2))
-            fixup ma1 ma2 = do
-                a1 <- ma1
-                a2 <- ma2
-                r1 <- wait a1
-                return $ (r1,) <$> a2
+    parFuseBoth = parFuseInternal (waitFirst (,))
 
     parFuseS :: forall i o x m r .
                     (MonadUnliftIO m, Semigroup r)
                     => ParConduit i x m r
                     -> ParConduit x o m r
                     -> ParConduit i o m r
-    parFuseS = parFuseInternal fixup
-        where
-            fixup :: m (Async r) -> m (Async r) -> m (Async r)
-            fixup ma1 ma2 = do
-                a1 <- ma1
-                a2 <- ma2
-                r1 <- wait a1
-                return $ (r1 <>) <$> a2
+    parFuseS = parFuseInternal (waitFirst (<>))
+
 
 {-
     tee :: forall i m .  MonadUnliftIO m
