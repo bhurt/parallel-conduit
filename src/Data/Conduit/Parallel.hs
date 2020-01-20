@@ -4,6 +4,7 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE RankNTypes                 #-}
 {-# LANGUAGE ScopedTypeVariables        #-}
+{-# LANGUAGE TupleSections              #-}
 {-# LANGUAGE TypeFamilies               #-}
 {-# LANGUAGE UndecidableInstances       #-}
 
@@ -67,9 +68,15 @@ module Data.Conduit.Parallel(
         opsProduceComplete :: IO ()
     }
 
-    spawn :: forall m a r . MonadUnliftIO m =>
-                m a -> ContT r m (Async a)
+    spawn :: forall m a r . MonadUnliftIO m
+                => m a
+                -> ContT r m (Async a)
     spawn act = ContT $ withAsync act
+
+    justSpawn :: forall i o m r . MonadUnliftIO m
+                => (Ops i o -> m r)
+                -> ParConduit i o m r
+    justSpawn act = ParConduit $ \ops -> return <$> spawn (act ops)
 
     data Complete =
         Complete
@@ -84,8 +91,7 @@ module Data.Conduit.Parallel(
 
 
     instance Functor m => Functor (ParConduit i o m) where
-        fmap f pc = ParConduit (\ops ->
-                                (fmap . fmap) (fmap f) (getParConduit pc ops))
+        fmap f pc = ParConduit $ (fmap . fmap) (fmap f) . getParConduit pc
 
     class Monad m => HasConduit i o m | m -> i, m -> o where
         consume :: m (Maybe i)
@@ -126,13 +132,10 @@ module Data.Conduit.Parallel(
 
     liftParT :: forall i o m r . MonadUnliftIO m
                     => ParT i o m r -> ParConduit i o m r
-    liftParT part = ParConduit go
+    liftParT part = justSpawn go
         where
-            go :: forall s .  Ops i o -> ContT s m (m (Async r))
-            go ops = return <$> spawn (go2 ops)
-
-            go2 :: Ops i o -> m r
-            go2 ops = do
+            go :: Ops i o -> m r
+            go ops = do
                 r <- runReaderT (getParT part) ops
                 liftIO $ do
                     opsProduceComplete ops
@@ -161,13 +164,10 @@ module Data.Conduit.Parallel(
                 => (Complete -> Complete)
                 -> C.ConduitT i o m r
                 -> ParConduit i o m r
-    liftConduitInternal f cond = ParConduit go
+    liftConduitInternal f cond = justSpawn go
         where
-            go :: forall s .  Ops i o -> ContT s m (m (Async r))
-            go ops = return <$> spawn (go2 ops)
-
-            go2 :: Ops i o -> m r
-            go2 ops = do
+            go :: Ops i o -> m r
+            go ops = do
                 r <- C.connect (csource (opsConsume ops))
                             (C.fuseUpstream cond
                                 (csink (opsProduce ops)))
@@ -178,7 +178,7 @@ module Data.Conduit.Parallel(
 
             csource :: IO (Maybe i) -> C.ConduitT () i m ()
             csource inp = do
-                r <- liftIO $ inp
+                r <- liftIO inp
                 case r of
                     Nothing -> return ()
                     Just x -> do
@@ -219,7 +219,7 @@ module Data.Conduit.Parallel(
             go :: forall s .  Ops i o -> ContT s m (m (Async r3))
             go ops = do
                 signalRef :: IORef Complete <- lift $ newIORef Ongoing
-                container :: MVar (Maybe x) <- lift $ newEmptyMVar
+                container :: MVar (Maybe x) <- lift newEmptyMVar
                 let leftOps :: Ops i x
                     leftOps = Ops {
                                 opsConsume = opsConsume ops,
@@ -243,10 +243,10 @@ module Data.Conduit.Parallel(
                             -> MVar (Maybe x)
                             -> x
                             -> IO Complete
-            fuseProduce iref mvar o = do
+            fuseProduce iref mvar o =
                     whenOngoing $ do
                         putMVar mvar (Just o)
-                        whenOngoing $ do
+                        whenOngoing $
                             return Ongoing
                 where
                     whenOngoing act = do
@@ -257,7 +257,7 @@ module Data.Conduit.Parallel(
 
             fuseProduceComplete :: MVar (Maybe x)
                                 -> IO ()
-            fuseProduceComplete mvar = do
+            fuseProduceComplete mvar =
                 putMVar mvar Nothing
 
             fuseConsume :: MVar (Maybe x)
@@ -325,7 +325,7 @@ module Data.Conduit.Parallel(
                 a1 <- ma1
                 a2 <- ma2
                 r1 <- wait a1
-                return $ (\r2 -> (r1, r2)) <$> a2
+                return $ (r1,) <$> a2
 
     parFuseS :: forall i o x m r .
                     (MonadUnliftIO m, Semigroup r)
