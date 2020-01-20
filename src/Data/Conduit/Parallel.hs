@@ -46,19 +46,19 @@ module Data.Conduit.Parallel(
     parFuseS
 ) where
 
-    import Control.Applicative
-    import Control.Monad
-    import Control.Monad.Base
-    import Control.Monad.Fail
-    import Control.Monad.Fix
-    import Control.Monad.Trans
-    import Control.Monad.Trans.Cont
-    import Control.Monad.Trans.Control
-    import Control.Monad.Trans.Reader
-    import Control.Monad.Zip
-    import Data.Conduit (Void)
-    import qualified Data.Conduit as C
-    import UnliftIO
+    import qualified Control.Applicative         as M
+    import qualified Control.Monad               as M
+    import qualified Control.Monad.Base          as M
+    import qualified Control.Monad.Fail          as M
+    import qualified Control.Monad.Fix           as M
+    import           Control.Monad.Trans
+    import           Control.Monad.Trans.Cont
+    import qualified Control.Monad.Trans.Control as M
+    import           Control.Monad.Trans.Reader
+    import qualified Control.Monad.Zip           as M
+    import           Data.Conduit                (Void)
+    import qualified Data.Conduit                as C
+    import           UnliftIO
 
     data Ops i o = Ops {
         opsConsume :: IO (Maybe i),
@@ -98,8 +98,8 @@ module Data.Conduit.Parallel(
         produce = lift . produce
 
     newtype ParT i o m a = ParT { getParT :: ReaderT (Ops i o) m a }
-        deriving (Functor, Applicative, Monad, MonadFix, MonadFail,
-                    MonadZip, MonadIO, Alternative, MonadPlus)
+        deriving (Functor, Applicative, Monad, M.MonadFix, M.MonadFail,
+                    M.MonadZip, MonadIO, M.Alternative, M.MonadPlus)
 
     -- Can not auto-derive this?  Wha??
     instance MonadTrans (ParT i o) where
@@ -111,18 +111,18 @@ module Data.Conduit.Parallel(
                 f :: UnliftIO (ReaderT (Ops i o) m) -> UnliftIO (ParT i o m)
                 f muio = UnliftIO $ unliftIO muio . getParT
 
-    instance MonadTransControl (ParT i o) where
-        type StT (ParT i o) a = StT (ReaderT (Ops i o)) a
-        liftWith = defaultLiftWith ParT getParT
-        restoreT = defaultRestoreT ParT
+    instance M.MonadTransControl (ParT i o) where
+        type StT (ParT i o) a = M.StT (ReaderT (Ops i o)) a
+        liftWith = M.defaultLiftWith ParT getParT
+        restoreT = M.defaultRestoreT ParT
 
-    instance MonadBase b m => MonadBase b (ParT i o m) where
-        liftBase = ParT . liftBase
+    instance M.MonadBase b m => M.MonadBase b (ParT i o m) where
+        liftBase = ParT . M.liftBase
 
-    instance MonadBaseControl b m => MonadBaseControl b (ParT i o m) where
-        type StM (ParT i o m) a = ComposeSt (ParT i o) m a
-        liftBaseWith = defaultLiftBaseWith
-        restoreM = defaultRestoreM
+    instance M.MonadBaseControl b m => M.MonadBaseControl b (ParT i o m) where
+        type StM (ParT i o m) a = M.ComposeSt (ParT i o) m a
+        liftBaseWith = M.defaultLiftBaseWith
+        restoreM = M.defaultRestoreM
 
     liftParT :: forall i o m r . MonadUnliftIO m
                     => ParT i o m r -> ParConduit i o m r
