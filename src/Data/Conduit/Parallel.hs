@@ -129,6 +129,14 @@ module Data.Conduit.Parallel(
         liftBaseWith = M.defaultLiftBaseWith
         restoreM = M.defaultRestoreM
 
+    instance MonadIO m => HasConduit i o (ParT i o m) where
+        consume = do 
+            ops <- ParT ask
+            liftIO $ opsConsume ops
+        produce o = do
+            ops <- ParT ask
+            liftIO $ opsProduce ops o
+
     liftParT :: forall i o m r . MonadUnliftIO m
                     => ParT i o m r -> ParConduit i o m r
     liftParT part = justSpawn go
