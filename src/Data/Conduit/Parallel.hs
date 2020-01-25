@@ -1,4 +1,6 @@
 {-# LANGUAGE DefaultSignatures          #-}
+{-# LANGUAGE DeriveDataTypeable         #-}
+{-# LANGUAGE DeriveGeneric              #-}
 {-# LANGUAGE FlexibleInstances          #-}
 {-# LANGUAGE FunctionalDependencies     #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
@@ -32,18 +34,39 @@ UnliftIO so that many different monads can be supported.
 
 -}
 module Data.Conduit.Parallel(
-    Complete(..),
+
+    -- * The ParConduit Type
+    --
+    -- | And running a parallel conduit.
     ParConduit,
-    HasConduit(..),
-    ParT,
-    liftParT,
     runParConduit,
+
+    -- * Converting normal Conduits to ParConduits
+    --
+    -- | By lifting Conduits into ParConduits we take advantage of the
+    -- rich Conduit ecosystem.
     liftConduit,
     liftConduitAll,
+
+    -- * Combining ParConduits
+    --
+    -- | parFuse and variants, similar to Conduit's fuse function.
     parFuse,
     parFuseUpstream,
     parFuseBoth,
-    parFuseS
+    parFuseS,
+
+    -- * The ParT monad transformer
+    --
+    -- | The normal way to create a ParConduit is to convert a normal
+    -- Conduit into a ParConduit.  But some times we know we're only
+    -- going to be in ParConduit, and we don't want the "overhead"
+    -- (note the scare quotes) of Conduit, so we provide an alternative
+    -- interface.
+    Complete(..),
+    HasConduit(..),
+    ParT,
+    liftParT
 ) where
 
     import qualified Control.Applicative         as M
@@ -58,39 +81,91 @@ module Data.Conduit.Parallel(
     import qualified Control.Monad.Zip           as M
     import           Data.Conduit                (Void)
     import qualified Data.Conduit                as C
+    import           GHC.Generics
     import           UnliftIO
 
+    -- | Prevent boolean blindness on whether the downstream ParConduit
+    -- is still consuming input.
+    data Complete =
+        Complete    -- ^ Downstream is not still consuming input- further
+                    -- input sent downstream will be discarded.
+        | Ongoing -- ^ Downstream is still consuming input.
+        deriving (Show, Read, Ord, Eq, Enum, Bounded, Typeable, Generic)
+
+    -- | Internal structure to handle the arguments we pass around.
+    --
+    -- Rather than pass some data structure (like a raw MVar) around,
+    -- we wrap the data structure up into closures, allowing us to
+    -- have different structures for different situations.  This
+    -- saves us from needing one structure for all situations.
     data Ops i o = Ops {
+        -- | Get a value from upstream.  Nothing means the upstream
+        -- has completed and no more values will be provided.
         opsConsume :: IO (Maybe i),
+
+        -- | Send a value to downstream.  If this function returns
+        -- Complete, that means the downstream has completed and
+        -- all further produced values will be discarded.
         opsProduce :: o -> IO Complete,
+
+        -- | Call when the thread will no longer be consuming more
+        -- input.  This normally signals the upstream ParConduit and
+        -- consumes and discards all remaining input.
         opsConsumeComplete :: IO (),
+
+        -- | Call when the thread will no longer be produce more
+        -- output.  This normally sends a Nothing to the downstream
+        -- opsConsume.
         opsProduceComplete :: IO ()
     }
 
+    -- | A ParConduit segment.
+    --
+    -- The type is modeled off the Conduit type.
+    --
+    -- We do not supply Applicative or Monad instances for this
+    -- type- the implementation is difficult and the semantics would
+    -- be complicated and surprising.  If you want to do this, do
+    -- it with a normal Conduit, and then convert the Conduit into
+    -- a ParConduit.
+    newtype ParConduit i o m r = 
+        ParConduit {
+            -- Good resource on the ContT monad:
+            -- https://ro-che.info/articles/2019-06-07-why-use-contt
+            -- Using contT lets us combine withAsync calls.
+            -- Also note the return type of m (Async r)- that it's
+            -- a monadic action is important.  It lets us await
+            -- asyncs we're not returning.  This says that there
+            -- are two phases: the phase where we spawn all the
+            -- threads we need, and the phase where we await all
+            -- but one of the threads we spawned.
+            getParConduit :: forall s .  Ops i o -> ContT s m (m (Async r))
+            }
+        deriving (Typeable)
+
+    -- We can't auto-derive the Functor implemenation.  Which doesn't
+    -- surprise me, it took me several tries to get it right.
+    instance Functor m => Functor (ParConduit i o m) where
+        fmap f pc = ParConduit $ (fmap . fmap) (fmap f) . getParConduit pc
+
+    -- | Spawn a thread using withSync.
+    --
+    -- Factoring this out into it's own function just makes my head
+    -- hurt less.
     spawn :: forall m a r . MonadUnliftIO m
                 => m a
                 -> ContT r m (Async a)
     spawn act = ContT $ withAsync act
 
+    -- | A simple ParConduit.
+    --
+    -- Factored out to eliminate duplication.  Used in the simple
+    -- (leaf) case where all we do is spawn a single thread.
     justSpawn :: forall i o m r . MonadUnliftIO m
                 => (Ops i o -> m r)
                 -> ParConduit i o m r
     justSpawn act = ParConduit $ \ops -> return <$> spawn (act ops)
 
-    data Complete =
-        Complete
-        | Ongoing
-
-    newtype ParConduit i o m r = ParConduit {
-                                        getParConduit ::
-                                            forall s . 
-                                            Ops i o
-                                            -> ContT s m (m (Async r))
-                                    }
-
-
-    instance Functor m => Functor (ParConduit i o m) where
-        fmap f pc = ParConduit $ (fmap . fmap) (fmap f) . getParConduit pc
 
     class Monad m => HasConduit i o m | m -> i, m -> o where
         consume :: m (Maybe i)
@@ -101,6 +176,7 @@ module Data.Conduit.Parallel(
         default produce :: (HasConduit i o n, MonadTrans t, t n ~ m)
                         => o -> m Complete
         produce = lift . produce
+        {-# MINIMAL consume, produce #-}
 
     newtype ParT i o m a = ParT { getParT :: ReaderT (Ops i o) m a }
         deriving (Functor, Applicative, Monad, M.MonadFix, M.MonadFail,
