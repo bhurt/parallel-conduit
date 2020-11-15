@@ -18,8 +18,10 @@ library
   exposed-modules:     Data.Conduit.Parallel
   build-depends:       base >= 4.7 && < 5
                         , conduit
+                        , deepseq
                         , monad-control
                         , mtl
+                        , stm
                         , transformers
                         , transformers-base
                         , unliftio

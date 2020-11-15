@@ -1,13 +1,18 @@
+{-# LANGUAGE GADTs               #-}
+{-# LANGUAGE RankNTypes          #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+
+{-
 {-# LANGUAGE DefaultSignatures          #-}
 {-# LANGUAGE DeriveDataTypeable         #-}
 {-# LANGUAGE DeriveGeneric              #-}
 {-# LANGUAGE FlexibleInstances          #-}
 {-# LANGUAGE FunctionalDependencies     #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE RankNTypes                 #-}
-{-# LANGUAGE ScopedTypeVariables        #-}
+{-# LANGUAGE InstanceSigs               #-}
 {-# LANGUAGE TypeFamilies               #-}
 {-# LANGUAGE UndecidableInstances       #-}
+-}
 
 {-|
 Module      : Data.Conduit.Parallel
@@ -33,7 +38,7 @@ main thread, and all the other sub-threads are cancelled).  We use
 UnliftIO so that many different monads can be supported.
 
 -}
-module Data.Conduit.Parallel(
+module Data.Conduit.Parallel {- (
 
     -- * The ParConduit Type
     --
@@ -74,75 +79,37 @@ module Data.Conduit.Parallel(
     HasConduit(..),
     ParT,
     liftParT
-) where
 
-    import qualified Control.Applicative         as M
-    import qualified Control.Monad               as M
-    import qualified Control.Monad.Base          as M
-    import qualified Control.Monad.Fail          as M
-    import qualified Control.Monad.Fix           as M
-    import           Control.Monad.Trans
+) -} where
+
+    import           Control.DeepSeq
     import           Control.Monad.Trans.Cont
-    import qualified Control.Monad.Trans.Control as M
-    import           Control.Monad.Trans.Reader
-    import qualified Control.Monad.Zip           as M
-    import           Data.Conduit                (Void)
-    import qualified Data.Conduit                as C
-    import           GHC.Generics
+    import           Data.Conduit                        (Void)
+    import qualified Data.Conduit                        as C
+    import           Data.Conduit.Parallel.Internal.Duct
     import           UnliftIO
 
-    -- | Prevent boolean blindness on whether the downstream ParConduit
-    -- is still consuming input.
-    data Complete =
-        Complete    -- ^ Downstream is not still consuming input- further
-                    -- input sent downstream will be discarded.
-        | Ongoing -- ^ Downstream is still consuming input.
-        deriving (Show, Read, Ord, Eq, Enum, Bounded, Typeable, Generic)
 
-    data ConsumeOps i = ConsumeOps {
-        -- | Get a value from upstream.  Nothing means the upstream
-        -- has completed and no more values will be provided.
-        copsConsume :: IO (Maybe i),
+{-
+    import           Control.Concurrent.MVar             (MVar)
 
-        -- | Call when the thread will no longer be consuming more
-        -- input.  This normally signals the upstream ParConduit and
-        -- consumes and discards all remaining input.
-        copsComplete :: IO () }
 
-    data ProduceOps o = ProduceOps {
-        -- | Send a value to downstream.  If this function returns
-        -- Complete, that means the downstream has completed and
-        -- all further produced values will be discarded.
-        popsProduce :: o -> IO Complete,
 
-        -- | Call when the thread will no longer be produce more
-        -- output.  This normally sends a Nothing to the downstream
-        -- opsConsume.
-        popsComplete :: IO ()
-    }
-
-    -- | Internal structure to handle the arguments we pass around.
-    --
-    -- Rather than pass some data structure (like a raw MVar) around,
-    -- we wrap the data structure up into closures, allowing us to
-    -- have different structures for different situations.  This
-    -- saves us from needing one structure for all situations.
-    data Ops i o = Ops {
-        getConsume :: ConsumeOps i,
-        getProduce :: ProduceOps o
-    }
-
-    opsConsume :: Ops i o -> IO (Maybe i)
-    opsConsume = copsConsume . getConsume
-
-    opsProduce :: Ops i o -> o -> IO Complete
-    opsProduce = popsProduce . getProduce
-
-    opsConsumeComplete :: Ops i o -> IO ()
-    opsConsumeComplete = copsComplete . getConsume
-
-    opsProduceComplete :: Ops i o -> IO ()
-    opsProduceComplete = popsComplete . getProduce
+    import qualified Control.Monad            as M
+    import           GHC.Generics
+    import qualified Control.Monad.Zip           as M
+    import           Control.Monad.Trans.Reader
+    import qualified Control.Monad.Trans.Control as M
+    import           Control.Monad.Trans
+    import qualified Control.Monad.Fix           as M
+    import qualified Control.Monad.Fail          as M
+    import qualified Control.Monad.Base          as M
+    import qualified Control.Concurrent.MVar     as MVar
+    import           Control.Concurrent.STM      (retry)
+    import           Control.Concurrent.STM      (TVar)
+    import qualified Control.Concurrent.STM      as STM
+    import qualified Control.Applicative         as M
+-}
 
     -- | A ParConduit segment.
     --
@@ -158,20 +125,42 @@ module Data.Conduit.Parallel(
             -- Good resource on the ContT monad:
             -- https://ro-che.info/articles/2019-06-07-why-use-contt
             -- Using contT lets us combine withAsync calls.
-            -- Also note the return type of m (Async r)- that it's
+            -- Also note the return type of m r- that it's
             -- a monadic action is important.  It lets us await
-            -- asyncs we're not returning.  This says that there
-            -- are two phases: the phase where we spawn all the
-            -- threads we need, and the phase where we await all
-            -- but one of the threads we spawned.
-            getParConduit :: forall s .  Ops i o -> ContT s m (m (Async r))
+            -- asyncs.  This says that there are two phases: the phase
+            -- where we spawn all the threads we need, and the phase
+            -- where we await all of the threads we spawned.
+            getParConduit ::
+                forall s .  
+                    ReadDuct i
+                    -> WriteDuct o
+                    -> ContT s m (m r)
             }
         deriving (Typeable)
 
-    -- We can't auto-derive the Functor implemenation.  Which doesn't
-    -- surprise me, it took me several tries to get it right.
+    -- | The fmap function.
+    --
+    -- This function is a lot easier to understand and modify if
+    -- I break out and explicitly type all the sub pieces (I am a
+    -- bear of very little brain).  This is easier to do as a
+    -- stand alone function not part of the Functor instance.
+    pcFunctor :: forall i o m a b .
+                    Functor m
+                    => (a -> b)
+                    -> ParConduit i o m a
+                    -> ParConduit i o m b
+    pcFunctor f pc = ParConduit go
+        where
+            go :: forall s . ReadDuct i -> WriteDuct o -> ContT s m (m b)
+            go rc wc = fixup (getParConduit pc rc wc)
+
+            fixup :: forall s . ContT s m (m a) -> ContT s m (m b)
+            fixup cm = fmap f <$> cm
+
+
     instance Functor m => Functor (ParConduit i o m) where
-        fmap f pc = ParConduit $ (fmap . fmap) (fmap f) . getParConduit pc
+        fmap = pcFunctor
+
 
     -- | Spawn a thread using withSync.
     --
@@ -179,353 +168,269 @@ module Data.Conduit.Parallel(
     -- hurt less.
     spawn :: forall m a r . MonadUnliftIO m
                 => m a
-                -> ContT r m (Async a)
-    spawn act = ContT $ withAsync act
+                -> ContT r m (m a)
+    spawn act = do
+        a <- ContT $ withAsync act
+        return (wait a)
+
 
     -- | A simple ParConduit.
     --
     -- Factored out to eliminate duplication.  Used in the simple
     -- (leaf) case where all we do is spawn a single thread.
     justSpawn :: forall i o m r . MonadUnliftIO m
-                => (Ops i o -> m r)
+                => (ReadDuct i -> WriteDuct o -> m r)
                 -> ParConduit i o m r
-    justSpawn act = ParConduit $ \ops -> return <$> spawn (act ops)
-
-    waitFirst :: forall r1 r2 r m . MonadUnliftIO m
-                => (r1 -> r2 -> r)
-                -> m (Async r1)
-                -> m (Async r2)
-                -> m (Async r)
-    waitFirst f ma1 ma2 = do
-        a1 <- ma1
-        a2 <- ma2
-        r1 <- wait a1
-        return $ f r1 <$> a2
-
-    runOps :: Ops () Void
-    runOps = Ops { getConsume = c, getProduce = p }
+    justSpawn act = ParConduit go
         where
-            c :: ConsumeOps ()
-            c = ConsumeOps {
-                    copsConsume = return Nothing,
-                    copsComplete = return () }
-
-            p :: ProduceOps Void
-            p = ProduceOps {
-                    popsProduce = \_ -> return Complete,
-                    popsComplete = return () }
-
+            go :: forall s .  ReadDuct i -> WriteDuct o
+                                -> ContT s m (m r)
+            go r w = spawn (act r w)
 
     runParConduit :: forall m r . MonadUnliftIO m
                         => ParConduit () Void m r -> m r
-    runParConduit pc = runContT (f runOps) go
-        where
-            f :: Ops () Void -> ContT r m (m (Async r))
-            f = getParConduit pc
+    runParConduit pc = runContT
+                        (getParConduit pc closedReadDuct closedWriteDuct) id
 
-            go :: m (Async r) -> m r
-            go act = act >>= wait
-
-    liftConduitInternal :: forall i o m r . MonadUnliftIO m
-                => (Complete -> Complete)
-                -> C.ConduitT i o m r
-                -> ParConduit i o m r
-    liftConduitInternal f cond = justSpawn go
+    liftConduit :: forall i o m r . 
+                    (MonadUnliftIO m
+                    , NFData o)
+                    => C.ConduitT i o m r
+                    -> ParConduit i o m r
+    liftConduit cond = justSpawn go
         where
-            go :: Ops i o -> m r
-            go ops = do
-                r <- C.connect (csource (opsConsume ops))
-                            (C.fuseUpstream cond
-                                (csink (opsProduce ops)))
+            go :: ReadDuct i -> WriteDuct o -> m r
+            go rd wd = do
+                r <- C.connect (csource rd)
+                            (C.fuseUpstream cond (csink wd))
                 liftIO $ do
-                    opsProduceComplete ops
-                    opsConsumeComplete ops
-                return r
+                    closeReadDuct rd
+                    closeWriteDuct wd
+                    return r
 
-            csource :: IO (Maybe i) -> C.ConduitT () i m ()
-            csource inp = do
-                r <- liftIO inp
+            csource :: ReadDuct i -> C.ConduitT () i m ()
+            csource rd = do
+                r <- liftIO $ readDuct rd
                 case r of
                     Nothing -> return ()
                     Just x -> do
                         C.yield x
-                        csource inp
+                        csource rd
 
-            csink :: MonadUnliftIO m
-                    => (o -> IO Complete)
-                    -> C.ConduitT o Void m ()
-            csink outp = do
+            csink :: WriteDuct o -> C.ConduitT o Void m ()
+            csink wd = do
                 r <- C.await
                 case r of
                     Nothing -> return ()
                     Just x -> do
-                        b <- liftIO $ outp x
-                        case f b of
-                            Ongoing  -> csink outp
-                            Complete -> return ()
+                        isc <- liftIO $ ductWrite wd x
+                        case isc of
+                            IsClosed -> return ()
+                            IsNotClosed -> csink wd
 
-    liftConduit :: forall i o m r . MonadUnliftIO m
-                => C.ConduitT i o m r
-                -> ParConduit i o m r
-    liftConduit = liftConduitInternal id
-
-    liftConduitAll :: forall i o m r . MonadUnliftIO m
-                => C.ConduitT i o m r
-                -> ParConduit i o m r
-    liftConduitAll = liftConduitInternal (const Ongoing)
-
-    monoOps :: forall x m . MonadIO m => m (Ops x x)
-    monoOps = do
-                signalRef :: IORef Complete <- liftIO $ newIORef Ongoing
-                container :: MVar (Maybe x) <- liftIO newEmptyMVar
-                let cops = ConsumeOps {
-                                copsConsume = monoConsume container,
-                                copsComplete = monoConsumeComplete
-                                                    signalRef container }
-                    pops = ProduceOps {
-                                popsProduce = monoProduce signalRef container,
-                                popsComplete = monoProduceComplete container }
-                return $ Ops { getConsume = cops, getProduce = pops }
-
-        where
-            monoProduce :: IORef Complete
-                            -> MVar (Maybe x)
-                            -> x
-                            -> IO Complete
-            monoProduce iref mvar x =
-                    whenOngoing $ do
-                        putMVar mvar (Just x)
-                        whenOngoing $
-                            return Ongoing
-                where
-                    whenOngoing act = do
-                        r <- readIORef iref
-                        case r of
-                            Complete -> return Complete
-                            Ongoing -> act
-
-            monoProduceComplete :: MVar (Maybe x)
-                                -> IO ()
-            monoProduceComplete mvar =
-                putMVar mvar Nothing
-
-            monoConsume :: MVar (Maybe x)
-                        -> IO (Maybe x)
-            monoConsume mvar = do
-                r <- takeMVar mvar
-                case r of
-                    Nothing -> do
-                        putMVar mvar Nothing
-                        return Nothing
-                    Just _ -> return r
-
-            monoConsumeComplete :: IORef Complete
-                                -> MVar (Maybe x)
-                                -> IO ()
-            monoConsumeComplete ioref mvar = do
-                    writeIORef ioref Complete
-                    consumeAll
-                where
-                    consumeAll = do
-                        r <- takeMVar mvar
-                        case r of
-                            Nothing -> return ()
-                            Just _ -> consumeAll
-
-
-    parFuseInternal :: forall i o x m r1 r2 r3 .
+    parFuseInternal :: forall i o x m r1 r2 r .
                     MonadUnliftIO m
-                    => (m (Async r1) -> m (Async r2) -> m (Async r3))
+                    => (r1 -> r2 -> r)
                     -> ParConduit i x m r1
                     -> ParConduit x o m r2
-                    -> ParConduit i o m r3
+                    -> ParConduit i o m r
     parFuseInternal fixup c1 c2 = ParConduit go
         where
-            go :: forall s .  Ops i o -> ContT s m (m (Async r3))
-            go outer = do
-                inner :: Ops x x <- monoOps
-                let leftOps :: Ops i x
-                    leftOps = Ops {
-                                getConsume = getConsume outer,
-                                getProduce = getProduce inner }
-                    rightOps :: Ops x o
-                    rightOps = Ops {
-                                getConsume = getConsume inner,
-                                getProduce = getProduce outer }
-                m1 :: m (Async r1) <- getParConduit c1 leftOps
-                m2 :: m (Async r2) <- getParConduit c2 rightOps
-                return $ fixup m1 m2
-
+            go :: forall s .  ReadDuct i -> WriteDuct o -> ContT s m (m r)
+            go outerRd outerWd = do
+                (innerRd, innerWd) <- liftIO $ createDuct
+                m1 :: m r1 <- getParConduit c1 outerRd innerWd
+                m2 :: m r2 <- getParConduit c2 innerRd outerWd
+                return $ fixup <$> m1 <*> m2
 
     parFuse :: forall i o x m r .
                     MonadUnliftIO m
                     => ParConduit i x m ()
                     -> ParConduit x o m r
                     -> ParConduit i o m r
-    parFuse = parFuseInternal (waitFirst (flip const))
+    parFuse = parFuseInternal (flip const)
 
     parFuseUpstream :: forall i o x m r .
                     MonadUnliftIO m
                     => ParConduit i x m r
                     -> ParConduit x o m ()
                     -> ParConduit i o m r
-    parFuseUpstream = parFuseInternal go
-        where
-            go :: m (Async r)
-                -> m (Async ())
-                -> m (Async r)
-            go m1 m2 = do
-                a1 <- m1
-                a2 <- m2
-                () <- wait a2
-                return a1
+    parFuseUpstream = parFuseInternal const
 
     parFuseBoth :: forall i o x m r1 r2 .
                     MonadUnliftIO m
                     => ParConduit i x m r1
                     -> ParConduit x o m r2
                     -> ParConduit i o m (r1, r2)
-    parFuseBoth = parFuseInternal (waitFirst (,))
+    parFuseBoth = parFuseInternal (\x y -> (x,y))
 
     parFuseS :: forall i o x m r .
                     (MonadUnliftIO m, Semigroup r)
                     => ParConduit i x m r
                     -> ParConduit x o m r
                     -> ParConduit i o m r
-    parFuseS = parFuseInternal (waitFirst (<>))
+    parFuseS = parFuseInternal (<>)
 
-    tee :: forall i m .  MonadUnliftIO m
+    copier :: forall m i .
+                (MonadIO m,
+                NFData i)
+                => ReadDuct i
+                -> [ WriteDuct i ]
+                -> m ()
+    copier _ [] = return ()
+    copier rd wds = do
+            r <- liftIO $ readDuct rd
+            case r of
+                Nothing -> return ()
+                Just x -> do
+                    newWds :: [ WriteDuct i ] <- doWrites x wds
+                    copier rd newWds
+        where
+            doWrites :: i -> [ WriteDuct i ] -> m [ WriteDuct i ]
+            doWrites _ [] = return []
+            doWrites x (w : ws) = do
+                s <- liftIO $ ductWrite w x
+                ws' <- doWrites x ws
+                return $ case s of
+                            IsClosed -> ws'
+                            IsNotClosed -> w : ws'
+
+    closeCopier :: forall m i .
+                    (MonadIO m)
+                    => ReadDuct i
+                    -> [ WriteDuct i ]
+                    -> m ()
+    closeCopier rd wds = liftIO $ do
+        closeReadDuct rd
+        mapM_ closeWriteDuct wds
+        return ()
+
+    copyWithClose :: forall m i .
+                        (MonadIO m
+                        , NFData i)
+                        => ReadDuct i
+                        -> [ WriteDuct i ]
+                        -> m ()
+    copyWithClose rd wds = copier rd wds >> closeCopier rd wds
+                    
+    branch :: forall m i o .
+                    (MonadUnliftIO m,
+                    NFData i)
+                    => ParConduit i o m ()
+                    -> ParConduit i o m ()
+                    -> ParConduit i o m ()
+    branch path1 path2 = ParConduit go
+        where
+            go :: forall s . ReadDuct i -> WriteDuct o -> ContT s m (m ())
+            go rd wd = do
+                (rc1, wc1) <- liftIO $ createDuct
+                (rc2, wc2) <- liftIO $ createDuct
+                m1 <- getParConduit path1 rc1 wd
+                m2 <- getParConduit path2 rc2 wd
+                m3 <- spawn $ copyWithClose rd [ wc1, wc2 ]
+                return $ m3 >> m1 >> m2
+
+    tee :: forall i m . 
+            (MonadUnliftIO m
+            , NFData i)
             => ParConduit i Void m ()
             -> ParConduit i i m ()
     tee sink = ParConduit go
         where
-            go :: forall s .  Ops i i -> ContT s m (m (Async ()))
-            go outer = do
-                inner :: Ops i i <- monoOps
-                let tops :: Ops i Void = Ops {
-                                            getConsume = getConsume inner,
-                                            getProduce = getProduce runOps }
-                a1 :: m (Async ()) <- getParConduit sink tops
-                a2 :: Async () <- spawn
-                                        (loop
-                                            (getConsume outer)
-                                            (Just (getProduce outer))
-                                            (Just (getProduce inner)))
-                return $ waitFirst const a1 (return a2)
+            go :: forall s .  ReadDuct i -> WriteDuct i -> ContT s m (m ())
+            go rd wd = do
+                (ird, iwd) <- liftIO $ createDuct
+                a1 :: m () <- getParConduit sink ird closedWriteDuct
+                a2 :: m () <- spawn $ copyWithClose rd [ wd, iwd ]
+                return $ const <$> a1 <*> a2
 
-            loop :: ConsumeOps i
-                    -> Maybe (ProduceOps i)
-                    -> Maybe (ProduceOps i)
-                    -> m ()
-            loop c Nothing Nothing = liftIO $ copsComplete c
-            loop c mp1 mp2 = do
-                mi <- liftIO $ copsConsume c
-                case mi of
-                    Just i -> do
-                        mp1' <- maybeProduce mp1 i
-                        mp2' <- maybeProduce mp2 i
-                        loop c mp1' mp2'
-                    Nothing -> do
-                        maybeComplete mp1
-                        maybeComplete mp2
-                        liftIO $ copsComplete c
-
-            maybeProduce :: Maybe (ProduceOps i)
-                            -> i
-                            -> m (Maybe (ProduceOps i))
-            maybeProduce Nothing  _ = return Nothing
-            maybeProduce (Just p) i = do
-                c <- liftIO $ popsProduce p i
-                case c of
-                    Ongoing -> return (Just p)
-                    Complete -> do
-                        liftIO $ popsComplete p
-                        return Nothing
-
-            maybeComplete :: Maybe (ProduceOps i)
-                            -> m ()
-            maybeComplete Nothing = return ()
-            maybeComplete (Just p) = do
-                liftIO $ popsComplete p
-                return ()
-
-    merge :: forall i m . MonadUnliftIO m
+    merge :: forall i m .
+            (MonadUnliftIO m
+            , NFData i)
             => ParConduit () i m ()
             -> ParConduit i i m ()
     merge src = ParConduit go
         where
-            go :: forall s .  Ops i i -> ContT s m (m (Async ()))
-            go outer = do
-                doneMVar :: MVar () <- newEmptyMVar
-                let srcProduceComplete :: IO ()
-                    srcProduceComplete = putMVar doneMVar ()
+            go :: forall s .  ReadDuct i -> WriteDuct i -> ContT s m (m ())
+            go ord owd = do
+                doneTVar :: TVar Bool <- newTVarIO False
+                m1 <- spawn $ doCopy ord owd doneTVar
+                (ird, iwd) <- liftIO $ createDuct
+                m2 <- getParConduit src closedReadDuct iwd
+                m3 <- spawn $ doCopy ird owd doneTVar
+                return $ m1 >> m2 >> m3
 
-                    srcProduce :: ProduceOps i
-                    srcProduce = ProduceOps {
-                                    popsProduce = popsProduce . getProduce
-                                                    $ outer,
-                                    popsComplete = srcProduceComplete }
-
-                    srcops :: Ops () i = Ops {
-                                        getConsume = getConsume runOps,
-                                        getProduce = srcProduce}
-
-                    loopProduceComplete :: IO ()
-                    loopProduceComplete = do
-                        () <- takeMVar doneMVar
-                        opsProduceComplete outer
-
-                    loopProduce :: ProduceOps i
-                    loopProduce = ProduceOps {
-                                    popsProduce = popsProduce . getProduce
-                                                    $ outer,
-                                    popsComplete = loopProduceComplete }
-
-                    loopops :: Ops i i = Ops {
-                                            getConsume = getConsume outer,
-                                            getProduce = loopProduce }
-                a1 :: m (Async ()) <- getParConduit src srcops
-                a2 :: Async () <- spawn (loop loopops)
-                return $ waitFirst const a1 (return a2)
-
-            loop :: Ops i i -> m ()
-            loop ops = do
-                inp <- liftIO $ opsConsume ops
-                case inp of
-                    Nothing -> done ops
-                    Just i -> do
-                        c <- liftIO $ opsProduce ops i
-                        case c of
-                            Ongoing -> loop ops
-                            Complete -> done ops
-
-            done :: Ops i i -> m ()
-            done ops = liftIO $ do
-                opsConsumeComplete ops
-                opsProduceComplete ops
-                return ()
-
+            doCopy :: ReadDuct i -> WriteDuct i -> TVar Bool -> m ()
+            doCopy rd wd tvar = do
+                copier rd [ wd ]
+                liftIO $ closeReadDuct rd
+                b <- liftIO . atomically $ do
+                        b' <- readTVar tvar
+                        writeTVar tvar True
+                        return b'
+                case b of
+                    False -> return ()
+                    True -> liftIO $ do
+                                        closeWriteDuct wd
+                                        return ()
+                
 {-
+    split :: forall a b o m .
+            => ParConduit a o m ()
+            -> ParConduit b o m ()
+            -> ParConduit (Either a b) o m ()
+    split leftFork rightFork = ParConduit go
+        where
+            go :: forall s .  ReadDuct i -> WriteDuct i
+                    -> ContT s m (m (Async ()))
+            go rd wd = do
+                (ird, iwd) <- createDuct
+                a1 :: m (Async ()) <- getParConduit sink ird noWriteDuct
+                let a2 :: m (Async ()) = spawn $ copier rd wd iwd
+                return $ const <$> a1 <*> a2
 
-    data ProduceOps o = ProduceOps {
-        popsProduce :: o -> IO Complete,
-        popsComplete :: IO ()
-    }
+            copier :: ReadDuct (Either a b) -> WriteDuct a
+                            -> WriteDuct b -> m ()
+            copier rd wd1 wd2 = runMaybeIOUnit $ finally loop closeAll
+                where
+                    loop :: MaybeT IO ()
+                    loop = do
+                        r <- readDuctMaybe rd
+                        case r of
+                            Left a  -> ductWrite wd1 a
+                            Right b -> ductWrite wd2 b
+                        loop
 
--}
-
-{-
-    fanout :: forall i o m . MonadUnliftIO m
+    replicate :: forall i o m . MonadUnliftIO m
             => Int
             -> ParConduit i o m ()
             -> ParConduit i o m ()
 
-    overlap :: forall a b m . MonadUnliftIO m
-            => Int
-            -> (a -> m b)
-            -> ParConduit a b m ()
+    synchronous :: forall a b m . MonadUnliftIO m
+                => Int
+                -> (a -> m b)
+                -> ParConduit a b m ()
 
--}
+
+    fan :: forall i1 i2 o m . MonadUnliftIO m
+            => ParConduit i1 o m ()
+            -> ParConduit i2 o m ()
+            -> ParConduit (Either i1 i2) o m ()
+
+    partition :: forall i1 i2 o m . MonadUnliftIO m
+                => ParConduit i1 o m ()
+                -> ParConduit i2 o m ()
+                -> ParConduit (i1, i2) o m ()
+
+    mapInput :: forall i1 i2 o m a .
+                (i2 -> i1)
+                -> ParConduit i1 o m a
+                -> ParConduit i2 o m a
+
+    mapOutput :: forall i o1 o2 m a .
+                (o1 -> o2)
+                -> ParConduit i o1 m a 
+                -> ParConduit i o2 m a
 
     class Monad m => HasConduit i o m | m -> i, m -> o where
         consume :: m (Maybe i)
@@ -584,4 +489,4 @@ module Data.Conduit.Parallel(
                     opsProduceComplete ops
                     opsConsumeComplete ops
                 return r
-
+-} 
