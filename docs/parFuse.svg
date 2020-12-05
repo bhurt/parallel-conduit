@@ -1,61 +1,59 @@
 <?xml version="1.0" encoding="UTF-8" standalone="no"?>
-<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.0//EN" "http://www.w3.org/TR/2001/PR-SVG-20010719/DTD/svg10.dtd">
-<svg width="28cm" height="16cm" viewBox="240 54 552 314" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
-  <g id="Background">
-    <rect style="fill: none; stroke-opacity: 1; stroke-width: 2; stroke: #000000" x="328" y="160" width="361" height="207" rx="0" ry="0"/>
-    <g>
-      <rect style="fill: #ffffff; fill-opacity: 1; stroke-opacity: 1; stroke-width: 2; stroke: #000000" x="392" y="245" width="84" height="41" rx="0" ry="0"/>
-      <text font-size="12.7998" style="fill: #000000; fill-opacity: 1; stroke: none;text-anchor:middle;font-family:sans-serif;font-style:normal;font-weight:normal" x="434" y="269.4">
-        <tspan x="434" y="269.4">par1</tspan>
-      </text>
-    </g>
-    <g>
-      <rect style="fill: #ffffff; fill-opacity: 1; stroke-opacity: 1; stroke-width: 2; stroke: #000000" x="546.1" y="244.8" width="84" height="41" rx="0" ry="0"/>
-      <text font-size="12.7998" style="fill: #000000; fill-opacity: 1; stroke: none;text-anchor:middle;font-family:sans-serif;font-style:normal;font-weight:normal" x="588.1" y="269.2">
-        <tspan x="588.1" y="269.2">par2</tspan>
-      </text>
-    </g>
-    <g>
-      <line style="fill: none; stroke-opacity: 1; stroke-width: 2; stroke: #000000" x1="476" y1="265.5" x2="536.364" y2="265.328"/>
-      <polygon style="fill: #000000; fill-opacity: 1; stroke-opacity: 1; stroke-width: 2; stroke: #000000" fill-rule="evenodd" points="543.864,265.306 533.878,270.335 536.364,265.328 533.85,260.335 "/>
-    </g>
-    <g>
-      <line style="fill: none; stroke-opacity: 1; stroke-width: 2; stroke: #000000" x1="242" y1="267" x2="382.264" y2="265.597"/>
-      <polygon style="fill: #000000; fill-opacity: 1; stroke-opacity: 1; stroke-width: 2; stroke: #000000" fill-rule="evenodd" points="389.764,265.522 379.815,270.622 382.264,265.597 379.715,260.623 "/>
-    </g>
-    <g>
-      <line style="fill: none; stroke-opacity: 1; stroke-width: 2; stroke: #000000" x1="630.1" y1="265.3" x2="781.264" y2="264.079"/>
-      <polygon style="fill: #000000; fill-opacity: 1; stroke-opacity: 1; stroke-width: 2; stroke: #000000" fill-rule="evenodd" points="788.764,264.018 778.805,269.099 781.264,264.079 778.724,259.099 "/>
-    </g>
-    <text font-size="18.0619" style="fill: #000000; fill-opacity: 1; stroke: none;text-anchor:start;font-family:sans-serif;font-style:normal;font-weight:normal" x="265" y="256">
-      <tspan x="265" y="256">i</tspan>
-    </text>
-    <text font-size="18.0619" style="fill: #000000; fill-opacity: 1; stroke: none;text-anchor:start;font-family:sans-serif;font-style:normal;font-weight:normal" x="753" y="256">
-      <tspan x="753" y="256">o</tspan>
-    </text>
-    <text font-size="18.0619" style="fill: #000000; fill-opacity: 1; stroke: none;text-anchor:start;font-family:sans-serif;font-style:normal;font-weight:normal" x="504" y="256">
-      <tspan x="504" y="256">x</tspan>
-      <tspan x="504" y="278.578"></tspan>
-    </text>
-    <g>
-      <polyline style="fill: none; stroke-opacity: 1; stroke-width: 2; stroke: #000000" points="588.1,244.8 588.1,211 509,211 509,64.7361 "/>
-      <polygon style="fill: #000000; fill-opacity: 1; stroke-opacity: 1; stroke-width: 2; stroke: #000000" fill-rule="evenodd" points="509,57.2361 514,67.2361 509,64.7361 504,67.2361 "/>
-    </g>
-    <g>
-      <line style="fill: none; stroke-opacity: 1; stroke-width: 2; stroke-linecap: round; stroke: #000000" x1="431" y1="198" x2="431" y2="203.6"/>
-      <line style="fill: none; stroke-opacity: 1; stroke-width: 2; stroke-linecap: round; stroke: #000000" x1="417" y1="198" x2="445" y2="198"/>
-      <line style="fill: none; stroke-opacity: 1; stroke-width: 2; stroke-linecap: round; stroke: #000000" x1="420.92" y1="189.6" x2="441.08" y2="189.6"/>
-      <line style="fill: none; stroke-opacity: 1; stroke-width: 2; stroke-linecap: round; stroke: #000000" x1="424.84" y1="181.2" x2="437.16" y2="181.2"/>
-      <text font-size="12.7998" style="fill: #000000; fill-opacity: 1; stroke: none;text-anchor:start;font-family:sans-serif;font-style:normal;font-weight:normal" x="455.4" y="188">
-        <tspan x="455.4" y="188"></tspan>
-      </text>
-    </g>
-    <g>
-      <line style="fill: none; stroke-opacity: 1; stroke-width: 2; stroke: #000000" x1="430" y1="240" x2="430.732" y2="213.341"/>
-      <polygon style="fill: #000000; fill-opacity: 1; stroke-opacity: 1; stroke-width: 2; stroke: #000000" fill-rule="evenodd" points="430.938,205.844 435.662,215.978 430.732,213.341 425.666,215.703 "/>
-    </g>
-    <text font-size="18.0619" style="fill: #000000; fill-opacity: 1; stroke: none;text-anchor:start;font-family:sans-serif;font-style:normal;font-weight:normal" x="521" y="106">
-      <tspan x="521" y="106">r</tspan>
-    </text>
-  </g>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.1" id="Layer_1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" x="0px" y="0px" width="350px" height="200px" viewBox="0 0 350 200" enable-background="new 0 0 350 200" xml:space="preserve">  <image id="image0" width="350" height="200" x="0" y="0"
+    href="data:image/png;base64,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
+AAAAAElFTkSuQmCC" />
 </svg>
