@@ -39,7 +39,7 @@ end to close the channel.
 module Data.Conduit.Parallel.Internal.Duct(
     IsClosed(..),
     ReadDuct,
-    readDuct,
+    ductRead,
     closeReadDuct,
     WriteDuct,
     comapWriteDuct,
@@ -81,10 +81,10 @@ module Data.Conduit.Parallel.Internal.Duct(
         fmap f (ReadUnmapped d) = ReadMapped d f
         fmap f (ReadMapped d g) = ReadMapped d (f . g)
 
-    readDuct :: ReadDuct a -> IO (Maybe a)
-    readDuct ReadClosed          = return Nothing
-    readDuct (ReadUnmapped duct) = doDuctRead duct
-    readDuct (ReadMapped duct f) = fmap f <$> doDuctRead duct
+    ductRead :: ReadDuct a -> IO (Maybe a)
+    ductRead ReadClosed          = return Nothing
+    ductRead (ReadUnmapped duct) = doDuctRead duct
+    ductRead (ReadMapped duct f) = fmap f <$> doDuctRead duct
 
     doDuctRead :: forall a . Duct a -> IO (Maybe a)
     doDuctRead duct = join $ atomically $ readSTM
