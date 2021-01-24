@@ -2,18 +2,6 @@
 {-# LANGUAGE RankNTypes          #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
-{-
-{-# LANGUAGE DefaultSignatures          #-}
-{-# LANGUAGE DeriveDataTypeable         #-}
-{-# LANGUAGE DeriveGeneric              #-}
-{-# LANGUAGE FlexibleInstances          #-}
-{-# LANGUAGE FunctionalDependencies     #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE InstanceSigs               #-}
-{-# LANGUAGE TypeFamilies               #-}
-{-# LANGUAGE UndecidableInstances       #-}
--}
-
 {-|
 Module      : Data.Conduit.Parallel
 Description : Parallel conduits, using Async, MVars, and UnliftIO
@@ -37,8 +25,14 @@ is used to spawn the threads, so exceptions are handled correctly
 main thread, and all the other sub-threads are cancelled).  We use
 UnliftIO so that many different monads can be supported.
 
+TODO: add more docu here.  Define the i, o, m, r types, terms input,
+output, result, sink, source, segment.
+
+TODO: Define behavior when segments exit- this is different from classic
+conduit.
+
 -}
-module Data.Conduit.Parallel {- (
+module Data.Conduit.Parallel(
 
     -- * The ParConduit Type
     --
@@ -51,7 +45,9 @@ module Data.Conduit.Parallel {- (
     -- | By lifting Conduits into ParConduits we take advantage of the
     -- rich Conduit ecosystem.
     liftConduit,
-    liftConduitAll,
+    basic,
+    simple,
+    complex,
 
     -- * Combining ParConduits
     --
@@ -65,62 +61,49 @@ module Data.Conduit.Parallel {- (
     --
     -- | Various ways to combine multiple concurrent ParConduits.
     --
+    concurrently,
     tee,
     merge,
+    consumeAll,
+    cache,
+    mapInput,
+    mapOutput,
 
-    -- * The ParT monad transformer
+    -- * Lazy datatype
     --
-    -- | The normal way to create a ParConduit is to convert a normal
-    -- Conduit into a ParConduit.  But some times we know we're only
-    -- going to be in ParConduit, and we don't want the "overhead"
-    -- (note the scare quotes) of Conduit, so we provide an alternative
-    -- interface.
-    Complete(..),
-    HasConduit(..),
-    ParT,
-    liftParT
+    -- | For sidestepping the NFData requirement
+    --
+    Lazy(..)
 
-) -} where
+) where
 
     import           Control.DeepSeq
+    import           Control.Monad
+    import           Control.Monad.STM                   (retry)
     import           Control.Monad.Trans.Cont
+    import qualified Data.Atomics.Counter                as Atomics
     import           Data.Conduit                        (Void)
     import qualified Data.Conduit                        as C
     import           Data.Conduit.Parallel.Internal.Duct
-    import           UnliftIO
+    import           Data.Sequence                       (Seq)
+    import qualified Data.Sequence                       as Seq
+    import           UnliftIO                            hiding (concurrently)
 
-
-{-
-    import           Control.Concurrent.MVar             (MVar)
-
-
-
-    import qualified Control.Monad            as M
-    import           GHC.Generics
-    import qualified Control.Monad.Zip           as M
-    import           Control.Monad.Trans.Reader
-    import qualified Control.Monad.Trans.Control as M
-    import           Control.Monad.Trans
-    import qualified Control.Monad.Fix           as M
-    import qualified Control.Monad.Fail          as M
-    import qualified Control.Monad.Base          as M
-    import qualified Control.Concurrent.MVar     as MVar
-    import           Control.Concurrent.STM      (retry)
-    import           Control.Concurrent.STM      (TVar)
-    import qualified Control.Concurrent.STM      as STM
-    import qualified Control.Applicative         as M
--}
+    -- A comment on the image tags: I don't know how to include the image
+    -- files as part of the documentation.  So instead, I (ab)use github
+    -- as an image file server.  This will probably get me into trouble
+    -- sooner or later.
 
     -- | A ParConduit segment.
     --
-    -- The type is modeled off the Conduit type.
+    -- The type is modeled off the [Data.Conduit.ConduitT](https://hackage.haskell.org/package/conduit-1.3.4/docs/Data-Conduit.html#g:2) type.
     --
     -- We do not supply Applicative or Monad instances for this
     -- type- the implementation is difficult and the semantics would
     -- be complicated and surprising.  If you want to do this, do
     -- it with a normal Conduit, and then convert the Conduit into
     -- a ParConduit.
-    newtype ParConduit i o m r = 
+    newtype ParConduit i o m r =
         ParConduit {
             -- Good resource on the ContT monad:
             -- https://ro-che.info/articles/2019-06-07-why-use-contt
@@ -131,7 +114,7 @@ module Data.Conduit.Parallel {- (
             -- where we spawn all the threads we need, and the phase
             -- where we await all of the threads we spawned.
             getParConduit ::
-                forall s .  
+                forall s .
                     ReadDuct i
                     -> WriteDuct o
                     -> ContT s m (m r)
@@ -187,12 +170,41 @@ module Data.Conduit.Parallel {- (
                                 -> ContT s m (m r)
             go r w = spawn (act r w)
 
+    -- | Runs a ParConduit.
+    --
+    -- Directly analogous to [Data.Conduit.runConduit](https://hackage.haskell.org/package/conduit-1.3.4/docs/Data-Conduit.html#v:runConduit).
     runParConduit :: forall m r . MonadUnliftIO m
                         => ParConduit () Void m r -> m r
     runParConduit pc = runContT
                         (getParConduit pc closedReadDuct closedWriteDuct) id
 
-    liftConduit :: forall i o m r . 
+    basic :: forall i o m r .
+                (MonadUnliftIO m
+                , NFData o)
+                => ((m (Maybe i)) -> (o -> m Bool) -> m r)
+                -> ParConduit i o m r
+    basic f = justSpawn go
+        where
+            go :: ReadDuct i -> WriteDuct o -> m r
+            go rd wd = do
+                r <- f (wrapRead rd) (wrapWrite wd)
+                liftIO $ do
+                    closeReadDuct rd
+                    closeWriteDuct wd
+                return r
+
+            wrapRead :: ReadDuct i -> m (Maybe i)
+            wrapRead = liftIO . ductRead
+
+            wrapWrite :: WriteDuct o -> o -> m Bool
+            wrapWrite wd o = do
+                ic <- liftIO $ ductWrite wd o
+                return $ case ic of
+                            IsClosed -> False
+                            IsNotClosed -> True
+
+    -- | Lift a normal Conduit segment into a ParConduit segment.
+    liftConduit :: forall i o m r .
                     (MonadUnliftIO m
                     , NFData o)
                     => C.ConduitT i o m r
@@ -210,7 +222,7 @@ module Data.Conduit.Parallel {- (
 
             csource :: ReadDuct i -> C.ConduitT () i m ()
             csource rd = do
-                r <- liftIO $ readDuct rd
+                r <- liftIO $ ductRead rd
                 case r of
                     Nothing -> return ()
                     Just x -> do
@@ -228,8 +240,79 @@ module Data.Conduit.Parallel {- (
                             IsClosed -> return ()
                             IsNotClosed -> csink wd
 
+    simple :: forall i o m .
+                (MonadUnliftIO m
+                , NFData o)
+                => (i -> m o)
+                -> ParConduit i o m ()
+    simple f = justSpawn go
+        where
+            go :: ReadDuct i -> WriteDuct o -> m ()
+            go rd wd = do
+                mi <- liftIO $ ductRead rd
+                case mi of
+                    Nothing -> liftIO $ closeWriteDuct wd
+                    Just i -> do
+                        o <- f i
+                        isc <- liftIO $ ductWrite wd o
+                        case isc of
+                            IsClosed -> liftIO $ closeReadDuct rd
+                            IsNotClosed -> go rd wd
+
+    complex :: forall i o m r s .
+                (MonadUnliftIO m
+                , NFData o)
+                => (s -> i -> m (Either s (s, [o])))
+                -> s
+                -> (s -> m r)
+                -> ParConduit i o m r
+    complex f sinit done = justSpawn (go sinit)
+        where
+            go :: s -> ReadDuct i -> WriteDuct o -> m r
+            go s rd wd = do
+                mi <- liftIO $ ductRead rd
+                case mi of
+                    Nothing -> do
+                        liftIO $ closeWriteDuct wd
+                        done s
+                    Just i -> do
+                        res <- f s i
+                        case res of
+                            Left s2 -> do
+                                liftIO $ closeReadDuct rd
+                                liftIO $ closeWriteDuct wd
+                                done s2
+                            Right (s2, os) -> writeOs rd wd s2 os
+
+            writeOs :: ReadDuct i -> WriteDuct o -> s -> [ o ] -> m r
+            writeOs rd wd s [] = go s rd wd
+            writeOs rd wd s (x:xs) = do
+                ic <- liftIO $ ductWrite wd x
+                case ic of
+                    IsClosed -> do
+                        liftIO $ closeReadDuct rd
+                        done s
+                    IsNotClosed -> writeOs rd wd s xs
+
+    {-
+    fold :: forall i m r s .
+            (MonadUnliftIO m)
+            => (s -> i -> m (Either s s))
+            -> s
+            -> (s -> m r)
+            -> ParConduit i Void m r
+
+    unfold :: forall o m r s .
+                (MonadUnliftIO m
+                , NFData o)
+                => (s -> m (Either s (s, [o])))
+                -> s
+                -> (s -> m r)
+                -> ParConduit () o m r
+    -}
+    -- | Shared code for all the parFuse* functions.
     parFuseInternal :: forall i o x m r1 r2 r .
-                    MonadUnliftIO m
+                    MonadIO m
                     => (r1 -> r2 -> r)
                     -> ParConduit i x m r1
                     -> ParConduit x o m r2
@@ -243,29 +326,90 @@ module Data.Conduit.Parallel {- (
                 m2 :: m r2 <- getParConduit c2 innerRd outerWd
                 return $ fixup <$> m1 <*> m2
 
+    -- | Fuse two conduits into one with the result from the latter.
+    --
+    -- Directly analogous to [Data.Conduit.fuse](https://hackage.haskell.org/package/conduit-1.3.4/docs/Data-Conduit.html#v:fuse).
+    --
+    -- The output of the first segment becomes the input to the second.
+    -- The result of the first segment is discarded (and thus should be unit)
+    -- while the result of the second segment is the result of the fused
+    -- segment.  Visually, the code:
+    --
+    -- > parFuse par1 par2
+    --
+    -- is wired up like:
+    --
+    -- <<https://raw.githubusercontent.com/bhurt/parallel-conduit/master/docs/parFuse.png parFuse>>
+    --
     parFuse :: forall i o x m r .
-                    MonadUnliftIO m
+                    MonadIO m
                     => ParConduit i x m ()
                     -> ParConduit x o m r
                     -> ParConduit i o m r
     parFuse = parFuseInternal (flip const)
 
+    -- | Fuse two conduits into one with the result from the former.
+    --
+    -- Directly analogous to [Data.Conduit.fuseUpstream](https://hackage.haskell.org/package/conduit-1.3.4/docs/Data-Conduit.html#v:fuseUpstream).
+    --
+    -- The output of the first segment becomes the input to the second.
+    -- The result of the second segment is discarded (and thus should be unit)
+    -- while the result of the first segment is the result of the fused
+    -- segment.  Visually, the code:
+    --
+    -- > parFuseUpstream par1 par2
+    --
+    -- is wired up like:
+    --
+    -- <<https://raw.githubusercontent.com/bhurt/parallel-conduit/master/docs/parFuseUpstream.png parFuseUpstream>>
+    --
     parFuseUpstream :: forall i o x m r .
-                    MonadUnliftIO m
+                    MonadIO m
                     => ParConduit i x m r
                     -> ParConduit x o m ()
                     -> ParConduit i o m r
     parFuseUpstream = parFuseInternal const
 
+    -- | Fuse two conduits into one with the result the tuple of the two
+    --   results.
+    --
+    -- Directly analogous to [Data.Conduit.fuseBoth](https://hackage.haskell.org/package/conduit-1.3.4/docs/Data-Conduit.html#v:fuseBoth).
+    --
+    -- The output of the first segment becomes the input to the second.
+    -- The result is the tuple of the two results.
+    -- Visually, the code:
+    --
+    -- > parFuseBoth par1 par2
+    --
+    -- is wired up like:
+    --
+    -- <<https://raw.githubusercontent.com/bhurt/parallel-conduit/master/docs/parFuseBoth.png parFuseBoth>>
+    --
     parFuseBoth :: forall i o x m r1 r2 .
-                    MonadUnliftIO m
+                    MonadIO m
                     => ParConduit i x m r1
                     -> ParConduit x o m r2
                     -> ParConduit i o m (r1, r2)
     parFuseBoth = parFuseInternal (\x y -> (x,y))
 
+    -- | Fuse two conduits into one with the result the concatentation
+    --   of the two results.
+    --
+    -- The output of the first segment becomes the input to the second.
+    -- The result is the concatenation via the semigroup append of the
+    -- two results.  The result types therefor need to implement
+    -- Semigroup.
+    --
+    -- Visually, the code:
+    --
+    -- > parFuseS par1 par2
+    --
+    -- is wired up like:
+    --
+    -- <<https://raw.githubusercontent.com/bhurt/parallel-conduit/master/docs/parFuseS.png parFuseS>>
+    --
     parFuseS :: forall i o x m r .
-                    (MonadUnliftIO m, Semigroup r)
+                    (MonadIO m, Semigroup r)
                     => ParConduit i x m r
                     -> ParConduit x o m r
                     -> ParConduit i o m r
@@ -279,7 +423,7 @@ module Data.Conduit.Parallel {- (
                 -> m ()
     copier _ [] = return ()
     copier rd wds = do
-            r <- liftIO $ readDuct rd
+            r <- liftIO $ ductRead rd
             case r of
                 Nothing -> return ()
                 Just x -> do
@@ -312,16 +456,38 @@ module Data.Conduit.Parallel {- (
                         -> [ WriteDuct i ]
                         -> m ()
     copyWithClose rd wds = copier rd wds >> closeCopier rd wds
-                    
-    branch :: forall m i o .
+
+    -- | Run two segments concurrently.
+    --
+    -- Given two segments, produce a single segment where the input
+    -- is duplicated and sent to both segments, and the output is
+    -- merged.  The result is the result of the second segment-
+    -- the result of the first segment is discarded (and thus must
+    -- be unit).
+    --
+    -- Both threads will put their results into the same MVar- so
+    -- the results will be more or less randomly intermingled.  One
+    -- pattern is then to have both segments be sinks, and not actually
+    -- output anything.  If output from only one of the two segments
+    -- is needed, consider using the `tee` function instead.
+    --
+    -- Visually, the code:
+    --
+    -- > concurrently par1 par2
+    --
+    -- is wired up internally like:
+    --
+    -- <<https://raw.githubusercontent.com/bhurt/parallel-conduit/master/docs/concurrently.png concurrently>>
+    --
+    concurrently :: forall m i o r .
                     (MonadUnliftIO m,
                     NFData i)
                     => ParConduit i o m ()
-                    -> ParConduit i o m ()
-                    -> ParConduit i o m ()
-    branch path1 path2 = ParConduit go
+                    -> ParConduit i o m r
+                    -> ParConduit i o m r
+    concurrently path1 path2 = ParConduit go
         where
-            go :: forall s . ReadDuct i -> WriteDuct o -> ContT s m (m ())
+            go :: forall s . ReadDuct i -> WriteDuct o -> ContT s m (m r)
             go rd wd = do
                 (rc1, wc1) <- liftIO $ createDuct
                 (rc2, wc2) <- liftIO $ createDuct
@@ -330,85 +496,173 @@ module Data.Conduit.Parallel {- (
                 m3 <- spawn $ copyWithClose rd [ wc1, wc2 ]
                 return $ m3 >> m1 >> m2
 
-    tee :: forall i m . 
+    tee :: forall i m r .
             (MonadUnliftIO m
             , NFData i)
-            => ParConduit i Void m ()
-            -> ParConduit i i m ()
+            => ParConduit i Void m r
+            -> ParConduit i i m r
     tee sink = ParConduit go
         where
-            go :: forall s .  ReadDuct i -> WriteDuct i -> ContT s m (m ())
+            go :: forall s .  ReadDuct i -> WriteDuct i -> ContT s m (m r)
             go rd wd = do
                 (ird, iwd) <- liftIO $ createDuct
-                a1 :: m () <- getParConduit sink ird closedWriteDuct
+                a1 :: m r <- getParConduit sink ird closedWriteDuct
                 a2 :: m () <- spawn $ copyWithClose rd [ wd, iwd ]
                 return $ const <$> a1 <*> a2
 
-    merge :: forall i m .
+    merge :: forall i m r .
             (MonadUnliftIO m
             , NFData i)
-            => ParConduit () i m ()
-            -> ParConduit i i m ()
+            => ParConduit () i m r
+            -> ParConduit i i m r
     merge src = ParConduit go
         where
-            go :: forall s .  ReadDuct i -> WriteDuct i -> ContT s m (m ())
+            go :: forall s .  ReadDuct i -> WriteDuct i -> ContT s m (m r)
             go ord owd = do
-                doneTVar :: TVar Bool <- newTVarIO False
-                m1 <- spawn $ doCopy ord owd doneTVar
+                doneCounter :: Atomics.AtomicCounter
+                    <- liftIO $ Atomics.newCounter 2
+                m1 :: m () <- spawn $ doCopy ord owd doneCounter
                 (ird, iwd) <- liftIO $ createDuct
-                m2 <- getParConduit src closedReadDuct iwd
-                m3 <- spawn $ doCopy ird owd doneTVar
-                return $ m1 >> m2 >> m3
+                m2 :: m r <- getParConduit src closedReadDuct iwd
+                m3 :: m () <- spawn $ doCopy ird owd doneCounter
+                return $ do
+                    m1 
+                    r <- m2
+                    m3
+                    return r
 
-            doCopy :: ReadDuct i -> WriteDuct i -> TVar Bool -> m ()
-            doCopy rd wd tvar = do
+            doCopy :: ReadDuct i -> WriteDuct i -> Atomics.AtomicCounter -> m ()
+            doCopy rd wd acnt = do
                 copier rd [ wd ]
                 liftIO $ closeReadDuct rd
-                b <- liftIO . atomically $ do
-                        b' <- readTVar tvar
-                        writeTVar tvar True
-                        return b'
-                case b of
-                    False -> return ()
-                    True -> liftIO $ do
-                                        closeWriteDuct wd
-                                        return ()
-                
-{-
-    split :: forall a b o m .
-            => ParConduit a o m ()
-            -> ParConduit b o m ()
-            -> ParConduit (Either a b) o m ()
-    split leftFork rightFork = ParConduit go
+                n <- liftIO $ Atomics.incrCounter (negate 1) acnt
+                when (n == 0) $ liftIO $ closeWriteDuct wd
+
+    consumeAll :: forall m i .
+                    (MonadUnliftIO m
+                    , NFData i)
+                    => ParConduit i i m ()
+    consumeAll = ParConduit go
         where
-            go :: forall s .  ReadDuct i -> WriteDuct i
-                    -> ContT s m (m (Async ()))
+            go :: forall s .  ReadDuct i -> WriteDuct i -> ContT s m (m ())
+            go rd wd = spawn $ doCopy rd wd
+
+            doCopy :: ReadDuct i -> WriteDuct i -> m ()
+            doCopy rd wd = do
+                r <- liftIO $ ductRead rd
+                case r of
+                    Nothing -> do
+                        liftIO $ closeWriteDuct wd
+                        return ()
+                    Just x -> do
+                        ic <- liftIO $ ductWrite wd x
+                        case ic of
+                            IsClosed -> loop rd
+                            IsNotClosed -> doCopy rd wd
+
+            loop :: ReadDuct i -> m ()
+            loop rd = do
+                r <- liftIO $ ductRead rd
+                case r of
+                    Nothing -> return ()
+                    Just _ -> loop rd
+
+    cache :: forall m i .
+                (MonadUnliftIO m
+                , NFData i)
+                => Int
+                -> ParConduit i i m ()
+    cache csize = if (csize < 1)
+                    then error $ "ParConduit.cache: cache size of "
+                                    ++ show csize
+                                    ++ " is invalid."
+                    else ParConduit go
+        where
+            go :: forall s .  ReadDuct i -> WriteDuct i -> ContT s m (m ())
             go rd wd = do
-                (ird, iwd) <- createDuct
-                a1 :: m (Async ()) <- getParConduit sink ird noWriteDuct
-                let a2 :: m (Async ()) = spawn $ copier rd wd iwd
-                return $ const <$> a1 <*> a2
+                closedTVar <- liftIO $ newTVarIO IsNotClosed
+                seqTVar <- liftIO $ newTVarIO Seq.empty
+                m1 <- spawn $ readLoop closedTVar seqTVar rd
+                m2 <- spawn $ writeLoop closedTVar seqTVar wd
+                return $ m1 >> m2
 
-            copier :: ReadDuct (Either a b) -> WriteDuct a
-                            -> WriteDuct b -> m ()
-            copier rd wd1 wd2 = runMaybeIOUnit $ finally loop closeAll
-                where
-                    loop :: MaybeT IO ()
-                    loop = do
-                        r <- readDuctMaybe rd
-                        case r of
-                            Left a  -> ductWrite wd1 a
-                            Right b -> ductWrite wd2 b
-                        loop
+            readLoop :: TVar IsClosed
+                        -> TVar (Seq i)
+                        -> ReadDuct i
+                        -> m ()
+            readLoop closedTVar seqTVar rd = do
+                r <- liftIO $ ductRead rd
+                case r of
+                    Nothing -> atomically $ writeTVar closedTVar IsClosed
+                    Just i -> do
+                        ic <- atomically $ do
+                                ic <- readTVar closedTVar
+                                case ic of
+                                    IsClosed    -> return ()
+                                    IsNotClosed -> do
+                                        sq <- readTVar seqTVar
+                                        if Seq.length sq >= csize
+                                        then retry
+                                        else writeTVar seqTVar (sq Seq.|> i)
+                                return ic
+                        case ic of
+                            IsClosed    -> liftIO $ closeReadDuct rd
+                            IsNotClosed -> readLoop closedTVar seqTVar rd
 
-    replicate :: forall i o m . MonadUnliftIO m
+            writeLoop :: TVar IsClosed
+                            -> TVar (Seq i)
+                            -> WriteDuct i
+                            -> m ()
+            writeLoop closedTVar seqTVar wd =
+                let loop x = do
+                                ic <- liftIO $ ductWrite wd x
+                                case ic of
+                                    IsNotClosed ->
+                                        writeLoop closedTVar seqTVar wd
+                                    IsClosed    ->
+                                        atomically $ do
+                                            writeTVar closedTVar IsClosed
+                                            writeTVar seqTVar Seq.empty
+                                            return ()
+                in
+                join . atomically $ do
+                        sq <- readTVar seqTVar
+                        case Seq.viewl sq of
+                            (i Seq.:< sq2) -> do
+                                writeTVar seqTVar sq2
+                                return $ loop i
+                            Seq.EmptyL     -> do
+                                ic <- readTVar closedTVar 
+                                case ic of
+                                    IsNotClosed -> retry
+                                    IsClosed    -> 
+                                        return $ liftIO $ closeWriteDuct wd
+
+{-
+
+    fork :: forall i o m r.
+            (MonadUnliftIO m
+            , Monoid r)
+            => ParConduit i Void m r
+            -> ParConduit i Void m r
+            -> ParConduit i Void m r
+
+    combine :: forall i o m r
+                (MonadUnliftIO m
+                , Monoid r)
+                => ParConduit () o m r
+                -> ParConduit () o m r
+                -> ParConduit () o m r
+
+    replicate :: forall i o m .
+            MonadUnliftIO m
             => Int
             -> ParConduit i o m ()
             -> ParConduit i o m ()
 
     synchronous :: forall a b m . MonadUnliftIO m
                 => Int
-                -> (a -> m b)
+                -> (a -> m [b])
                 -> ParConduit a b m ()
 
 
@@ -422,71 +676,29 @@ module Data.Conduit.Parallel {- (
                 -> ParConduit i2 o m ()
                 -> ParConduit (i1, i2) o m ()
 
+-}
+
     mapInput :: forall i1 i2 o m a .
                 (i2 -> i1)
                 -> ParConduit i1 o m a
                 -> ParConduit i2 o m a
+    mapInput f par = ParConduit go
+        where
+            go :: forall s .  ReadDuct i2 -> WriteDuct o -> ContT s m (m a)
+            go rduct = getParConduit par (fmap f rduct)
 
     mapOutput :: forall i o1 o2 m a .
-                (o1 -> o2)
-                -> ParConduit i o1 m a 
+                NFData o2
+                => (o1 -> o2)
+                -> ParConduit i o1 m a
                 -> ParConduit i o2 m a
-
-    class Monad m => HasConduit i o m | m -> i, m -> o where
-        consume :: m (Maybe i)
-        default consume :: (HasConduit i o n, MonadTrans t, t n ~ m)
-                        => m (Maybe i)
-        consume = lift consume
-        produce :: o -> m Complete
-        default produce :: (HasConduit i o n, MonadTrans t, t n ~ m)
-                        => o -> m Complete
-        produce = lift . produce
-        {-# MINIMAL consume, produce #-}
-
-    newtype ParT i o m a = ParT { getParT :: ReaderT (Ops i o) m a }
-        deriving (Functor, Applicative, Monad, M.MonadFix, M.MonadFail,
-                    M.MonadZip, MonadIO, M.Alternative, M.MonadPlus)
-
-    -- Can not auto-derive this?  Wha??
-    instance MonadTrans (ParT i o) where
-        lift = ParT . lift
-
-    instance MonadUnliftIO m => MonadUnliftIO (ParT i o m) where
-        askUnliftIO = ParT $ f <$> askUnliftIO
-            where
-                f :: UnliftIO (ReaderT (Ops i o) m) -> UnliftIO (ParT i o m)
-                f muio = UnliftIO $ unliftIO muio . getParT
-
-    instance M.MonadTransControl (ParT i o) where
-        type StT (ParT i o) a = M.StT (ReaderT (Ops i o)) a
-        liftWith = M.defaultLiftWith ParT getParT
-        restoreT = M.defaultRestoreT ParT
-
-    instance M.MonadBase b m => M.MonadBase b (ParT i o m) where
-        liftBase = ParT . M.liftBase
-
-    instance M.MonadBaseControl b m => M.MonadBaseControl b (ParT i o m) where
-        type StM (ParT i o m) a = M.ComposeSt (ParT i o) m a
-        liftBaseWith = M.defaultLiftBaseWith
-        restoreM = M.defaultRestoreM
-
-    instance MonadIO m => HasConduit i o (ParT i o m) where
-        consume = do 
-            ops <- ParT ask
-            liftIO $ opsConsume ops
-        produce o = do
-            ops <- ParT ask
-            liftIO $ opsProduce ops o
-
-    liftParT :: forall i o m r . MonadUnliftIO m
-                    => ParT i o m r -> ParConduit i o m r
-    liftParT part = justSpawn go
+    mapOutput f par = ParConduit go
         where
-            go :: Ops i o -> m r
-            go ops = do
-                r <- runReaderT (getParT part) ops
-                liftIO $ do
-                    opsProduceComplete ops
-                    opsConsumeComplete ops
-                return r
--} 
+            go :: forall s . ReadDuct i -> WriteDuct o2 -> ContT s m (m a)
+            go rduct wduct = getParConduit par rduct (comapWriteDuct f wduct)
+
+
+    newtype Lazy a = Lazy { getLazy :: a }
+
+    instance NFData (Lazy a) where
+        rnf = rwhnf . getLazy
