@@ -10,7 +10,8 @@ License     : BSD 3-clause
 Maintainer  : bhurt42@gmail.com
 Stability   : experimental
 
-This library implements a parallel version of the very useful Data.Conduits
+This library implements a parallel version of the 
+[Data.Conduit](https://hackage.haskell.org/package/conduit-1.3.4/docs/Data-Conduit.html)
 library.  Each stage of conduit is executed in it's own thread, concurrent
 with the other stages.  This allows the whole process to overlap I/Os and
 use multiple cores to perform computation.  In addition, the parallel
@@ -25,11 +26,6 @@ is used to spawn the threads, so exceptions are handled correctly
 main thread, and all the other sub-threads are cancelled).  We use
 UnliftIO so that many different monads can be supported.
 
-TODO: add more docu here.  Define the i, o, m, r types, terms input,
-output, result, sink, source, segment.
-
-TODO: Define behavior when segments exit- this is different from classic
-conduit.
 
 -}
 module Data.Conduit.Parallel(
@@ -45,9 +41,6 @@ module Data.Conduit.Parallel(
     -- | By lifting Conduits into ParConduits we take advantage of the
     -- rich Conduit ecosystem.
     liftConduit,
-    basic,
-    simple,
-    complex,
 
     -- * Combining ParConduits
     --
@@ -68,6 +61,12 @@ module Data.Conduit.Parallel(
     cache,
     mapInput,
     mapOutput,
+
+    -- * Alternate ParConduit constructors
+    --
+    -- | Other ways to contruct single-segment ParConduits.
+    basic,
+    simple,
 
     -- * Lazy datatype
     --
@@ -96,13 +95,33 @@ module Data.Conduit.Parallel(
 
     -- | A ParConduit segment.
     --
-    -- The type is modeled off the [Data.Conduit.ConduitT](https://hackage.haskell.org/package/conduit-1.3.4/docs/Data-Conduit.html#g:2) type.
+    -- The type is modeled off the [Data.Conduit.ConduitT](https://hackage.haskell.org/package/conduit-1.3.4/docs/Data-Conduit.html#g:2) type.  We have
+    -- four type variables:
+    --
+    --  * @i@ is the type of values being consumed, the "input" type
+    --
+    --  * @o@ is the type of values being produced, the "output" type
+    --
+    --  * @m@ is the monad being executed in
+    --
+    --  * @r@ is the result type, produced when the segment exits.
+    --
+    -- We might represent a segment pictorially like:
+    --
+    -- <<https://raw.githubusercontent.com/bhurt/parallel-conduit/master/docs/example.png example>>
+    --
+    -- ParConduit instances where the @i@ type is @()@ are called
+    -- sources.  They only produce output, they don't consume input.
+    -- Instances where the @o@ type is @Void@ are called sinks.
+    -- They only consume input, and don't produce output.
     --
     -- We do not supply Applicative or Monad instances for this
     -- type- the implementation is difficult and the semantics would
     -- be complicated and surprising.  If you want to do this, do
     -- it with a normal Conduit, and then convert the Conduit into
     -- a ParConduit.
+    --
+
     newtype ParConduit i o m r =
         ParConduit {
             -- Good resource on the ContT monad:
@@ -259,6 +278,7 @@ module Data.Conduit.Parallel(
                             IsClosed -> liftIO $ closeReadDuct rd
                             IsNotClosed -> go rd wd
 
+    {-
     complex :: forall i o m r s .
                 (MonadUnliftIO m
                 , NFData o)
@@ -292,9 +312,7 @@ module Data.Conduit.Parallel(
                     IsClosed -> do
                         liftIO $ closeReadDuct rd
                         done s
-                    IsNotClosed -> writeOs rd wd s xs
 
-    {-
     fold :: forall i m r s .
             (MonadUnliftIO m)
             => (s -> i -> m (Either s s))
@@ -310,6 +328,7 @@ module Data.Conduit.Parallel(
                 -> (s -> m r)
                 -> ParConduit () o m r
     -}
+
     -- | Shared code for all the parFuse* functions.
     parFuseInternal :: forall i o x m r1 r2 r .
                     MonadIO m
@@ -496,6 +515,10 @@ module Data.Conduit.Parallel(
                 m3 <- spawn $ copyWithClose rd [ wc1, wc2 ]
                 return $ m3 >> m1 >> m2
 
+    -- | Copy the stream of inputs to a sink
+    --
+    -- <<https://raw.githubusercontent.com/bhurt/parallel-conduit/master/docs/tee.png tee>>
+    -- 
     tee :: forall i m r .
             (MonadUnliftIO m
             , NFData i)
@@ -510,6 +533,10 @@ module Data.Conduit.Parallel(
                 a2 :: m () <- spawn $ copyWithClose rd [ wd, iwd ]
                 return $ const <$> a1 <*> a2
 
+    -- | Add a source's output to the stream.
+    --
+    -- <<https://raw.githubusercontent.com/bhurt/parallel-conduit/master/docs/merge.png merge>>
+    -- 
     merge :: forall i m r .
             (MonadUnliftIO m
             , NFData i)
